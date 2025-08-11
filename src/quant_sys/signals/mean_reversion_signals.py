@@ -126,7 +126,7 @@ class MeanReversionSignalGenerator:
         SELECT 
             symbol,
             MAX(CASE WHEN indicator_name = 'rsi' THEN value END) as rsi,
-            MAX(CASE WHEN indicator_name = 'bb_position' THEN value END) as bb_position,
+            MAX(CASE WHEN indicator_name = 'bb_percent_b' THEN value END) as bb_position,
             MAX(CASE WHEN indicator_name = 'bb_upper' THEN value END) as bb_upper,
             MAX(CASE WHEN indicator_name = 'bb_lower' THEN value END) as bb_lower,
             MAX(CASE WHEN indicator_name = 'sma_20' THEN value END) as sma_20,
@@ -240,10 +240,28 @@ class MeanReversionSignalGenerator:
         
         for _, row in df.iterrows():
             symbol = row['symbol']
+            
+            # Get values with safe defaults
             z_score = row.get('z_score', 0)
             rsi = row.get('rsi', 50)
             bb_position = row.get('bb_position', 0)
             price_vs_mean = row.get('price_vs_mean', 0)
+            
+            # Handle None/NaN values - convert to appropriate defaults
+            if pd.isna(z_score) or z_score is None:
+                z_score = 0.0
+            if pd.isna(rsi) or rsi is None:
+                rsi = 50.0
+            if pd.isna(bb_position) or bb_position is None:
+                bb_position = 0.0
+            if pd.isna(price_vs_mean) or price_vs_mean is None:
+                price_vs_mean = 0.0
+                
+            # Ensure all values are floats
+            z_score = float(z_score)
+            rsi = float(rsi)
+            bb_position = float(bb_position)
+            price_vs_mean = float(price_vs_mean)
             
             # Initialize signal variables
             signal_type = 'neutral'
@@ -253,7 +271,7 @@ class MeanReversionSignalGenerator:
             # Strong mean reversion buy signal
             if z_score < -self.z_entry_threshold:
                 signal_type = 'long'
-                signal_strength = min(abs(z_score) / 3, 1.0)  # Scale strength
+                signal_strength = min(abs(z_score) / 3, 1.0)
                 reasons.append(f"Z-score: {z_score:.2f} (oversold)")
                 
                 # Confirm with RSI
@@ -262,7 +280,7 @@ class MeanReversionSignalGenerator:
                     reasons.append(f"RSI oversold: {rsi:.1f}")
                     
                 # Confirm with Bollinger Bands
-                if bb_position < -0.8:  # Near or below lower band
+                if bb_position < -0.8:
                     signal_strength = min(signal_strength * 1.1, 1.0)
                     reasons.append("Below lower Bollinger Band")
                     
@@ -278,7 +296,7 @@ class MeanReversionSignalGenerator:
                     reasons.append(f"RSI overbought: {rsi:.1f}")
                     
                 # Confirm with Bollinger Bands
-                if bb_position > 0.8:  # Near or above upper band
+                if bb_position > 0.8:
                     signal_strength = min(signal_strength * 1.1, 1.0)
                     reasons.append("Above upper Bollinger Band")
                     

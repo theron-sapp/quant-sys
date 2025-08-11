@@ -292,7 +292,7 @@ def calculate_features(
     
     if not start_date:
         # Default to 1 year of data
-        start_dt = datetime.strptime(end_date, '%Y-%m-%d') - timedelta(days=365)
+        start_dt = datetime.strptime(end_date, '%Y-%m-%d') - timedelta(days=750)
         start_date = start_dt.strftime('%Y-%m-%d')
     
     console.print(f"Date range: {start_date} to {end_date}")

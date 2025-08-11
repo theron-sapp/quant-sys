@@ -110,32 +110,29 @@ class MomentumSignalGenerator:
         return latest
     
     def _fetch_features(
-        self,
-        date: str,
-        universe: Optional[List[str]] = None
+    self,
+    date: str,
+    universe: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        """Fetch technical features for signal generation."""
+        """Fetch technical features for mean reversion analysis."""
         
-        # Build query based on universe
         if universe:
             symbols_str = "','".join(universe)
             where_clause = f"AND symbol IN ('{symbols_str}')"
         else:
             where_clause = ""
             
+        # Note: Using COALESCE to provide default values for NULL results
         query = f"""
         SELECT 
             symbol,
-            MAX(CASE WHEN indicator_name = 'hqm_score' THEN value END) as hqm_score,
-            MAX(CASE WHEN indicator_name = 'momentum_252d' THEN value END) as momentum_12m,
-            MAX(CASE WHEN indicator_name = 'momentum_126d' THEN value END) as momentum_6m,
-            MAX(CASE WHEN indicator_name = 'momentum_63d' THEN value END) as momentum_3m,
-            MAX(CASE WHEN indicator_name = 'momentum_21d' THEN value END) as momentum_1m,
-            MAX(CASE WHEN indicator_name = 'rsi' THEN value END) as rsi,
-            MAX(CASE WHEN indicator_name = 'macd_signal' THEN value END) as macd_signal,
-            MAX(CASE WHEN indicator_name = 'bb_position' THEN value END) as bb_position,
-            MAX(CASE WHEN indicator_name = 'ewma_vol' THEN value END) as volatility,
-            MAX(CASE WHEN indicator_name = 'atr_pct' THEN value END) as atr_pct
+            COALESCE(MAX(CASE WHEN indicator_name = 'rsi' THEN value END), 50) as rsi,
+            COALESCE(MAX(CASE WHEN indicator_name = 'bb_percent_b' THEN value END), 0) as bb_position,
+            MAX(CASE WHEN indicator_name = 'bb_upper' THEN value END) as bb_upper,
+            MAX(CASE WHEN indicator_name = 'bb_lower' THEN value END) as bb_lower,
+            MAX(CASE WHEN indicator_name = 'bb_middle' THEN value END) as sma_20,
+            MAX(CASE WHEN indicator_name = 'relative_volume' THEN value END) as volume_ratio,
+            COALESCE(MAX(CASE WHEN indicator_name = 'atr_pct' THEN value END), 0.02) as atr_pct
         FROM technical_indicators
         WHERE date = '{date}'
         {where_clause}

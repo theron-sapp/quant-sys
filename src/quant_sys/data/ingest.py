@@ -102,6 +102,7 @@ def ingest(settings: Settings, top_n: int | None = None, no_autofetch: bool = Fa
     # pull prices
     sym_list = sym_df["symbol"].tolist()
     chunks = []
+    print(f"Start date: {settings.data.start}")
     for batch in track([sym_list[i:i+50] for i in range(0, len(sym_list), 50)], description="Downloading OHLCV"):
         d = download_ohlcv(batch, settings.data.start)
         for df in d.values():
