@@ -48,3 +48,5 @@ quant-sys/
   notebooks/                # ad hoc research
   tests/
 ```
+
+test
