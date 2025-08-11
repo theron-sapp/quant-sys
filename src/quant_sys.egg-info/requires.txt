@@ -1,0 +1,19 @@
+pandas>=2.2
+numpy>=1.26
+yfinance>=0.2.50
+SQLAlchemy>=2.0
+PyYAML>=6.0
+pydantic>=2.7
+typer>=0.12
+rich>=13.7
+pandas-market-calendars>=4.4
+python-dateutil>=2.9
+tqdm>=4.66
+pyarrow>=15.0
+requests>=2.31
+
+[backtest]
+backtesting>=0.3.3
+
+[backtest:python_version >= "3.10" or platform_system == "Linux"]
+vectorbtpro

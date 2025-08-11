@@ -1,0 +1,2 @@
+[console_scripts]
+quant = quant_sys.cli:app

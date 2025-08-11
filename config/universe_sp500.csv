@@ -1,0 +1,52 @@
+symbol,name,sector
+AAPL,Apple Inc.,Information Technology
+MSFT,Microsoft Corporation,Information Technology
+AMZN,Amazon.com Inc.,Consumer Discretionary
+META,Meta Platforms Inc.,Communication Services
+GOOGL,Alphabet Inc. Class A,Communication Services
+NVDA,NVIDIA Corporation,Information Technology
+TSLA,Tesla Inc.,Consumer Discretionary
+BRK-B,Berkshire Hathaway Inc. Class B,Financials
+JPM,JPMorgan Chase & Co.,Financials
+V,Visa Inc.,Financials
+JNJ,Johnson & Johnson,Health Care
+UNH,UnitedHealth Group Inc.,Health Care
+XOM,Exxon Mobil Corporation,Energy
+WMT,Walmart Inc.,Consumer Staples
+PG,Procter & Gamble Co.,Consumer Staples
+MA,Mastercard Inc.,Financials
+HD,Home Depot Inc.,Consumer Discretionary
+CVX,Chevron Corporation,Energy
+LLY,Eli Lilly and Co.,Health Care
+ABBV,AbbVie Inc.,Health Care
+MRK,Merck & Co. Inc.,Health Care
+PEP,PepsiCo Inc.,Consumer Staples
+KO,Coca-Cola Co.,Consumer Staples
+AVGO,Broadcom Inc.,Information Technology
+COST,Costco Wholesale Corporation,Consumer Staples
+ADBE,Adobe Inc.,Information Technology
+CRM,Salesforce Inc.,Information Technology
+NFLX,Netflix Inc.,Communication Services
+AMD,Advanced Micro Devices Inc.,Information Technology
+ORCL,Oracle Corporation,Information Technology
+BAC,Bank of America Corp,Financials
+WFC,Wells Fargo & Company,Financials
+GS,Goldman Sachs Group Inc.,Financials
+MS,Morgan Stanley,Financials
+C,Citigroup Inc.,Financials
+DIS,Walt Disney Co.,Communication Services
+VZ,Verizon Communications Inc.,Communication Services
+T,AT&T Inc.,Communication Services
+INTC,Intel Corporation,Information Technology
+CSCO,Cisco Systems Inc.,Information Technology
+BA,Boeing Co.,Industrials
+CAT,Caterpillar Inc.,Industrials
+GE,General Electric Co.,Industrials
+HON,Honeywell International Inc.,Industrials
+UPS,United Parcel Service Inc.,Industrials
+SPY,SPDR S&P 500 ETF Trust,ETF
+QQQ,Invesco QQQ Trust,ETF
+IWM,iShares Russell 2000 ETF,ETF
+TLT,iShares 20+ Year Treasury Bond ETF,ETF
+GLD,SPDR Gold Shares,ETF
+^VIX,CBOE Volatility Index,Index
