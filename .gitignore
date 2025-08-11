@@ -1,0 +1,11 @@
+data/
+venv/
+.env
+.DS_Store
+.vscode/
+.pytest_cache/
+.coverage
+.coverage.*
+.coverage.xml
+.coverage.xml.*
+.coverage.xml.*.*
