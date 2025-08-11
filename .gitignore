@@ -1,5 +1,6 @@
 data/
-venv/
+.venv/
+db/
 .env
 .DS_Store
 .vscode/
@@ -9,3 +10,4 @@ venv/
 .coverage.xml
 .coverage.xml.*
 .coverage.xml.*.*
+.gitignore
