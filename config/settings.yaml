@@ -1,103 +1,162 @@
-capital_base: 10000
-gross_exposure_cap: 5000 # |long| + |short| <= 5000
-target_vol_annual: 0.11
-max_drawdown_stop: 0.25
-rebalance_day: "MONDAY_OPEN"
-
-risk_management:
-  max_drawdown: 0.15 # Tighten from 0.25
-  portfolio_stops:
-    individual: 0.20
-    portfolio: 0.12 # Warning at 12%
-
-strategy_allocation:
-  growth_regime:
-    momentum_weight: 0.6
-    value_weight: 0.2
-    mean_reversion: 0.2
-  dividend_regime:
-    dividend_quality: 0.6
-    value: 0.3
-    momentum: 0.1
-
-paths:
-  db_path: "db/quant.sqlite"
-  universe_file: "config/universe_sp500.csv"
-  raw_dir: "data/raw"
-  curated_dir: "data/curated"
-
-data:
-  start: "2005-01-01"
-  source: "yfinance"
-  symbols_extra: ["SPY", "QQQ", "IWM", "^VIX"]
-  universe_trim_top_liquidity: 300
-
+capital_base: 10000.0
 costs:
   equities:
     commission_per_share: 0.005
     slippage_bps: 8
   options:
     commission_per_contract: 1.0
-    spread_penalty_pct: 0.10
-
+    spread_penalty_pct: 0.1
+data:
+  source: yfinance
+  start: '2005-01-01'
+  symbols_extra:
+  - SPY
+  - QQQ
+  - IWM
+  - ^VIX
+  universe_trim_top_liquidity: 300
+gross_exposure_cap: 5000.0
+max_drawdown_stop: 0.25
+momentum_signals:
+  hqm_requirements:
+    min_score: 60.0
+    top_percentile: 20
+  momentum_thresholds:
+    moderate_positive: 0.1
+    strong_negative: -0.2
+    strong_positive: 0.2
+    weak_negative: -0.1
+  rsi_filters:
+    overbought_threshold: 85
+    oversold_threshold: 15
+    reduction_factor: 0.7
+  thresholds:
+    long_signal: 0.25
+    min_strength: 0.2
+    short_signal: -0.2
+  weights:
+    cross_sectional: 0.35
+    hqm: 0.4
+    time_series: 0.25
+options_overlay:
+  directional:
+    dte:
+    - 30
+    - 45
+    notional_pct_per_trade: 0.03
+    structure: debit_call_spread
+    target_deltas:
+    - 0.35
+    - 0.2
+    use_on_top_conviction: 5
+  enabled: true
+  hedge:
+    budget_pct_of_gross: 0.02
+    dte:
+    - 30
+    - 45
+    product: SPY
+    target_beta_hedge: 0.35
+    trigger_vix_pct: 85
+    type: put_spread
+    width_pct: 0.05
+paths:
+  curated_dir: data/curated
+  db_path: db/quant.sqlite
+  raw_dir: data/raw
+  universe_file: config/universe_sp500.csv
+portfolio:
+  max_names: 25
+  max_sector_weight: 0.25
+  max_weight_per_name: 0.08
+  min_trade_notional: 500.0
+  position_sizing:
+    max_position_scaling: 1.2
+    mean_rev_base_size: 0.06
+    min_position_scaling: 0.5
+    momentum_base_size: 0.08
+  regime_exposure_scaling:
+    crisis: 0.3
+    dividend: 0.5
+    growth: 0.9
+    neutral: 0.7
+    strong_growth: 1.0
+  turnover_cap_weekly: 0.4
+  volatility_scaling:
+    cap_gross: 1.0
+    ewma_lambda: 0.94
+    floor_gross: 0.3
+rebalance_day: MONDAY_OPEN
+regime_detection:
+  persistence:
+    confidence_threshold: 0.75
+    min_days: 5
+  signal_weights:
+    economic: 0.2
+    macd: 0.2
+    momentum: 0.2
+    vix: 0.4
+  vix_thresholds:
+    crisis_min: 40
+    dividend_min: 30
+    growth_max: 20
+    neutral_range:
+    - 20
+    - 30
+    strong_growth: 15
+regime_strategy_allocation:
+  crisis:
+    cash_weight: 0.5
+    mean_reversion_weight: 0.1
+    momentum_weight: 0.05
+  dividend:
+    cash_weight: 0.1
+    mean_reversion_weight: 0.2
+    momentum_weight: 0.2
+  growth:
+    cash_weight: 0.0
+    mean_reversion_weight: 0.3
+    momentum_weight: 0.5
+  neutral:
+    cash_weight: 0.0
+    mean_reversion_weight: 0.4
+    momentum_weight: 0.3
+  strong_growth:
+    cash_weight: 0.0
+    mean_reversion_weight: 0.2
+    momentum_weight: 0.7
+risk_management:
+  max_drawdown: 0.15
+  portfolio_stops:
+    individual: 0.2
+    portfolio: 0.12
 signals:
+  mean_rev:
+    lookback_days: 5
+    weight: 0.15
+    z_entry: 1.0
+  risk_filters:
+    vix_block_above_pct: 85
+    vix_percentile_lookback: 60
   ts_mom:
     lookback_weeks: 52
-    skip_recent_weeks: 4 # 12-1 effect
+    skip_recent_weeks: 4
     threshold: 0.0
     weight: 0.5
   xs_mom:
-    lookback_weeks: 52
-    bucket: 5 # quintiles
+    bucket: 5
+    gross_alloc: 0.5
     long_bucket: 5
+    lookback_weeks: 52
     short_bucket: 1
-    gross_alloc: 0.5 # proportion of gross cap reserved
     weight: 0.35
-  mean_rev:
-    lookback_days: 5
-    z_entry: 1.0
-    weight: 0.15
-  risk_filters:
-    vix_percentile_lookback: 60
-    vix_block_above_pct: 85 # block new risk in panic regimes
-
-portfolio:
-  max_names: 30
-  max_weight_per_name: 0.08 # of gross cap
-  max_sector_weight: 0.25
-  min_trade_notional: 100
-  turnover_cap_weekly: 0.40
-  volatility_scaling:
-    ewma_lambda: 0.94
-    floor_gross: 0.30 # don’t scale below 30% gross for noise
-    cap_gross: 1.00 # never exceed gross_exposure_cap
-
-options_overlay:
-  enabled: true
-  hedge:
-    trigger_vix_pct: 85
-    target_beta_hedge: 0.35
-    product: "SPY"
-    dte: [30, 45]
-    type: "put_spread"
-    width_pct: 0.05
-    budget_pct_of_gross: 0.02
-  directional:
-    use_on_top_conviction: 5 # apply to top 5 names by score
-    dte: [30, 45]
-    structure: "debit_call_spread"
-    target_deltas: [0.35, 0.20]
-    notional_pct_per_trade: 0.03
-
-regime_detection:
-  vix_thresholds:
-    growth_max: 20
-    dividend_min: 30
-  signal_weights:
-    vix: 0.4
-    momentum: 0.2
-    macd: 0.2
-    economic: 0.2
-  persistence:
-    min_days: 5
-    confidence_threshold: 0.75
+strategy_allocation:
+  dividend_regime:
+    dividend_quality: 0.6
+    momentum: 0.1
+    value: 0.3
+  growth_regime:
+    mean_reversion: 0.2
+    momentum_weight: 0.6
+    value_weight: 0.2
+target_vol_annual: 0.11

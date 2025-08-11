@@ -110,9 +110,9 @@ class MeanReversionSignalGenerator:
 
     
     def _fetch_features(
-        self,
-        date: str,
-        universe: Optional[List[str]] = None
+    self,
+    date: str,
+    universe: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """Fetch technical features for mean reversion analysis."""
         
@@ -122,16 +122,21 @@ class MeanReversionSignalGenerator:
         else:
             where_clause = ""
             
+        # FIXED: Use actual indicator names from our database
         query = f"""
         SELECT 
             symbol,
-            MAX(CASE WHEN indicator_name = 'rsi' THEN value END) as rsi,
-            MAX(CASE WHEN indicator_name = 'bb_percent_b' THEN value END) as bb_position,
+            COALESCE(MAX(CASE WHEN indicator_name = 'rsi' THEN value END), 50) as rsi,
+            COALESCE(MAX(CASE WHEN indicator_name = 'bb_percent_b' THEN value END), 0) as bb_position,
             MAX(CASE WHEN indicator_name = 'bb_upper' THEN value END) as bb_upper,
             MAX(CASE WHEN indicator_name = 'bb_lower' THEN value END) as bb_lower,
-            MAX(CASE WHEN indicator_name = 'sma_20' THEN value END) as sma_20,
-            MAX(CASE WHEN indicator_name = 'volume_ratio' THEN value END) as volume_ratio,
-            MAX(CASE WHEN indicator_name = 'atr_pct' THEN value END) as atr_pct
+            MAX(CASE WHEN indicator_name = 'bb_middle' THEN value END) as sma_20,
+            MAX(CASE WHEN indicator_name = 'relative_volume' THEN value END) as volume_ratio,
+            COALESCE(MAX(CASE WHEN indicator_name = 'atr_pct' THEN value END), 0.02) as atr_pct,
+            -- Additional indicators for mean reversion
+            MAX(CASE WHEN indicator_name = 'zscore_5d' THEN value END) as zscore_5d,
+            MAX(CASE WHEN indicator_name = 'return_5d' THEN value END) as return_5d,
+            MAX(CASE WHEN indicator_name = 'return_1d' THEN value END) as return_1d
         FROM technical_indicators
         WHERE date = '{date}'
         {where_clause}

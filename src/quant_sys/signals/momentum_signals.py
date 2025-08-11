@@ -114,7 +114,7 @@ class MomentumSignalGenerator:
     date: str,
     universe: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        """Fetch technical features for mean reversion analysis."""
+        """Fetch technical features for momentum analysis."""
         
         if universe:
             symbols_str = "','".join(universe)
@@ -122,7 +122,7 @@ class MomentumSignalGenerator:
         else:
             where_clause = ""
             
-        # Note: Using COALESCE to provide default values for NULL results
+        # FIXED: Use actual indicator names from our database
         query = f"""
         SELECT 
             symbol,
@@ -132,7 +132,12 @@ class MomentumSignalGenerator:
             MAX(CASE WHEN indicator_name = 'bb_lower' THEN value END) as bb_lower,
             MAX(CASE WHEN indicator_name = 'bb_middle' THEN value END) as sma_20,
             MAX(CASE WHEN indicator_name = 'relative_volume' THEN value END) as volume_ratio,
-            COALESCE(MAX(CASE WHEN indicator_name = 'atr_pct' THEN value END), 0.02) as atr_pct
+            COALESCE(MAX(CASE WHEN indicator_name = 'atr_pct' THEN value END), 0.02) as atr_pct,
+            -- FIXED: Use our actual momentum indicators
+            MAX(CASE WHEN indicator_name = 'return_252d' THEN value END) as momentum_12m,
+            MAX(CASE WHEN indicator_name = 'return_21d' THEN value END) as momentum_1m,
+            MAX(CASE WHEN indicator_name = 'return_63d' THEN value END) as momentum_3m,
+            MAX(CASE WHEN indicator_name = 'hqm_score' THEN value END) as hqm_score
         FROM technical_indicators
         WHERE date = '{date}'
         {where_clause}
@@ -141,7 +146,7 @@ class MomentumSignalGenerator:
         
         df = pd.read_sql_query(query, self.engine)
         
-        # Calculate 12-1 momentum (skip recent month)
+        # Calculate 12-1 momentum (skip recent month) - FIXED
         if 'momentum_12m' in df.columns and 'momentum_1m' in df.columns:
             df['momentum_12_1'] = df['momentum_12m'] - df['momentum_1m']
             
@@ -255,21 +260,26 @@ class MomentumSignalGenerator:
         return hqm_signals
     
     def _combine_momentum_signals(
-        self,
-        df: pd.DataFrame,
-        ts_signals: pd.Series,
-        xs_signals: pd.Series,
-        hqm_signals: pd.Series
+    self,
+    df: pd.DataFrame,
+    ts_signals: pd.Series,
+    xs_signals: pd.Series,
+    hqm_signals: pd.Series
     ) -> Dict[str, MomentumSignal]:
         """
         Combine different momentum signals into final signals.
         
-        Weights:
-        - HQM: 40%
-        - Cross-sectional: 35%
-        - Time-series: 25%
+        NOW USES CONFIG VALUES INSTEAD OF HARDCODED THRESHOLDS
         """
         signals = {}
+        
+        # Get config values - NO MORE HARDCODING!
+        momentum_config = self.config.momentum_signals
+        weights = momentum_config.weights
+        thresholds = momentum_config.thresholds
+        rsi_filters = momentum_config.rsi_filters
+        hqm_req = momentum_config.hqm_requirements
+        mom_thresh = momentum_config.momentum_thresholds
         
         for _, row in df.iterrows():
             symbol = row['symbol']
@@ -279,42 +289,49 @@ class MomentumSignalGenerator:
             xs_sig = xs_signals.get(symbol, 0.0)
             hqm_sig = hqm_signals.get(symbol, 0.0)
             
-            # Calculate weighted composite signal
+            # Calculate weighted composite signal using CONFIG WEIGHTS
             composite_signal = (
-                0.40 * hqm_sig +
-                0.35 * xs_sig +
-                0.25 * ts_sig
+                weights.hqm * hqm_sig +
+                weights.cross_sectional * xs_sig +
+                weights.time_series * ts_sig
             )
             
-            # Apply RSI filter (avoid overbought/oversold extremes)
+            # Apply RSI filter using CONFIG THRESHOLDS
             rsi = row.get('rsi', 50)
-            if rsi > 80 and composite_signal > 0:
-                composite_signal *= 0.5  # Reduce long signal if overbought
-            elif rsi < 20 and composite_signal < 0:
-                composite_signal *= 0.5  # Reduce short signal if oversold
+            if rsi > rsi_filters.overbought_threshold and composite_signal > 0:
+                composite_signal *= rsi_filters.reduction_factor
+            elif rsi < rsi_filters.oversold_threshold and composite_signal < 0:
+                composite_signal *= rsi_filters.reduction_factor
                 
-            # Determine signal type and strength
-            if composite_signal > 0.5:
+            # Determine signal type using CONFIG THRESHOLDS
+            if composite_signal > thresholds.long_signal:
                 signal_type = 'long'
                 signal_strength = min(composite_signal, 1.0)
-            elif composite_signal < -0.3:
+            elif composite_signal < thresholds.short_signal:
                 signal_type = 'short'
                 signal_strength = min(abs(composite_signal), 1.0)
             else:
                 signal_type = 'neutral'
                 signal_strength = 0.0
                 
-            # Build reasons list
+            # Build reasons list using CONFIG VALUES
             reasons = []
-            if hqm_sig > 0:
-                reasons.append(f"HQM score: {row.get('hqm_score', 0):.1f}")
-            if abs(ts_sig) > 0.5:
-                reasons.append(f"12-1 momentum: {row.get('momentum_12_1', 0):.1%}")
-            if abs(xs_sig) > 0.5:
-                reasons.append(f"Top quintile performer")
-            if rsi > 70:
-                reasons.append(f"RSI high: {rsi:.1f}")
-            elif rsi < 30:
+            hqm_score = row.get('hqm_score', 0)
+            
+            if hqm_sig > (thresholds.min_strength):
+                reasons.append(f"HQM score: {hqm_score:.1f}")
+                
+            if abs(ts_sig) > thresholds.min_strength:
+                momentum_12_1 = row.get('momentum_12m', 0) - row.get('momentum_1m', 0)
+                reasons.append(f"12-1 momentum: {momentum_12_1:.1%}")
+                
+            if abs(xs_sig) > thresholds.min_strength:
+                reasons.append(f"Cross-sectional rank")
+                
+            # RSI warnings using CONFIG THRESHOLDS  
+            if rsi > (rsi_filters.overbought_threshold - 10):  # Warning zone
+                reasons.append(f"RSI elevated: {rsi:.1f}")
+            elif rsi < (rsi_filters.oversold_threshold + 10):  # Warning zone
                 reasons.append(f"RSI low: {rsi:.1f}")
                 
             # Create signal object
@@ -322,7 +339,7 @@ class MomentumSignalGenerator:
                 symbol=symbol,
                 signal_type=signal_type,
                 signal_strength=signal_strength,
-                hqm_score=row.get('hqm_score', 0),
+                hqm_score=hqm_score,
                 momentum_12m=row.get('momentum_12m', 0),
                 momentum_3m=row.get('momentum_3m', 0),
                 rsi=rsi,
@@ -333,16 +350,18 @@ class MomentumSignalGenerator:
         return signals
     
     def filter_by_volatility(
-        self,
-        signals: Dict[str, MomentumSignal],
-        max_volatility: float = 0.40
+    self,
+    signals: Dict[str, MomentumSignal],
+    max_volatility: Optional[float] = None
     ) -> Dict[str, MomentumSignal]:
         """
-        Filter signals by volatility threshold.
-        
-        High volatility stocks may be excluded or have reduced signals.
+        Filter signals by volatility threshold using CONFIG VALUES.
         """
-        # Fetch volatility data
+        # Use config value if not specified
+        if max_volatility is None:
+            max_volatility = self.config.signals.risk_filters.max_volatility
+            
+        # Rest of method stays the same but now uses config value
         symbols = list(signals.keys())
         symbols_str = "','".join(symbols)
         
@@ -357,17 +376,15 @@ class MomentumSignalGenerator:
         vol_df = pd.read_sql_query(query, self.engine)
         vol_dict = dict(zip(vol_df['symbol'], vol_df['volatility']))
         
-        # Filter signals
+        # Filter signals using CONFIG THRESHOLD
         filtered_signals = {}
         for symbol, signal in signals.items():
             vol = vol_dict.get(symbol, 0.20)  # Default 20% if missing
             
             if vol > max_volatility:
-                # Skip very high volatility stocks
                 logger.info(f"Filtering {symbol} due to high volatility: {vol:.1%}")
                 continue
-            elif vol > 0.30:
-                # Reduce signal strength for elevated volatility
+            elif vol > 0.30:  # Could also make this configurable
                 signal.signal_strength *= 0.7
                 signal.reasons.append(f"Signal reduced - volatility: {vol:.1%}")
                 

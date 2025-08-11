@@ -11,6 +11,7 @@ from rich.console import Console
 from typing import Optional, List
 import pandas as pd
 from datetime import datetime, timedelta
+from sqlalchemy import text
 
 from .core.config import load_settings
 from .core.storage import get_engine
@@ -1037,7 +1038,7 @@ def test_signals(
         GROUP BY symbol
         HAVING hqm_score IS NOT NULL
         ORDER BY hqm_score DESC
-        LIMIT 5
+        LIMIT 10
         """
         
         top_stocks = pd.read_sql_query(query, eng)
@@ -1088,15 +1089,17 @@ def calculate_hqm(
     s = load_settings(config_path)
     analyst = TechnicalAnalyst(s)
     
-    # Get available dates
-    query = """
+    # Get available dates - FIXED: Use text() wrapper with named parameter
+    from sqlalchemy import text
+    
+    query = text("""
     SELECT DISTINCT date
     FROM technical_indicators
     ORDER BY date DESC
-    LIMIT ?
-    """
+    LIMIT :limit
+    """)
     
-    dates_df = pd.read_sql_query(query, analyst.engine, params=[days_back])
+    dates_df = pd.read_sql_query(query, analyst.engine, params={'limit': days_back})
     
     if dates_df.empty:
         console.print("[red]No data found in technical_indicators[/red]")
@@ -1106,6 +1109,8 @@ def calculate_hqm(
     console.print(f"Processing {len(dates)} dates...")
     
     # Process each date
+    hqm_records_saved = 0
+    
     with console.status("[bold green]Calculating HQM scores...") as status:
         for i, date in enumerate(dates, 1):
             status.update(f"[bold green]Processing {date} ({i}/{len(dates)})...")
@@ -1132,8 +1137,14 @@ def calculate_hqm(
                         conn = sqlite3.connect(analyst.db_path)
                         cursor = conn.cursor()
                         
+                        # Delete existing HQM scores for this date first
+                        cursor.execute("""
+                            DELETE FROM technical_indicators 
+                            WHERE date = ? AND indicator_name = 'hqm_score'
+                        """, (date,))
+                        
                         cursor.executemany("""
-                            INSERT OR REPLACE INTO technical_indicators 
+                            INSERT INTO technical_indicators 
                             (date, symbol, indicator_name, value)
                             VALUES (?, ?, ?, ?)
                         """, [(r['date'], r['symbol'], r['indicator_name'], r['value']) 
@@ -1142,12 +1153,14 @@ def calculate_hqm(
                         conn.commit()
                         conn.close()
                         
+                        hqm_records_saved += len(records)
+                        
             except Exception as e:
                 console.print(f"[yellow]Error processing {date}: {e}[/yellow]")
                 continue
     
     # Verify results
-    query = """
+    verify_query = text("""
     SELECT 
         COUNT(DISTINCT symbol) as symbols,
         COUNT(*) as total,
@@ -1155,9 +1168,9 @@ def calculate_hqm(
         MAX(date) as max_date
     FROM technical_indicators
     WHERE indicator_name = 'hqm_score'
-    """
+    """)
     
-    result = pd.read_sql_query(query, analyst.engine)
+    result = pd.read_sql_query(verify_query, analyst.engine)
     
     console.print("\n[bold]HQM Score Calculation Complete![/bold]")
     
@@ -1165,23 +1178,25 @@ def calculate_hqm(
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="white")
     
-    table.add_row("Symbols with HQM", str(result['symbols'].iloc[0]))
-    table.add_row("Total Records", f"{result['total'].iloc[0]:,}")
-    table.add_row("Date Range", f"{result['min_date'].iloc[0]} to {result['max_date'].iloc[0]}")
+    if not result.empty:
+        table.add_row("Symbols with HQM", str(result['symbols'].iloc[0]))
+        table.add_row("Total Records", f"{result['total'].iloc[0]:,}")
+        table.add_row("Records Added This Run", f"{hqm_records_saved:,}")
+        table.add_row("Date Range", f"{result['min_date'].iloc[0]} to {result['max_date'].iloc[0]}")
     
     console.print(table)
     
     # Show top stocks by HQM
-    latest_query = """
+    top_query = text("""
     SELECT symbol, value as hqm_score
     FROM technical_indicators
     WHERE indicator_name = 'hqm_score'
     AND date = (SELECT MAX(date) FROM technical_indicators WHERE indicator_name = 'hqm_score')
     ORDER BY value DESC
     LIMIT 10
-    """
+    """)
     
-    top_stocks = pd.read_sql_query(latest_query, analyst.engine)
+    top_stocks = pd.read_sql_query(top_query, analyst.engine)
     
     if not top_stocks.empty:
         console.print("\n[bold]Top 10 Stocks by HQM Score:[/bold]")
@@ -1202,6 +1217,675 @@ def calculate_hqm(
     
     console.print("\n[green]✓[/green] HQM scores calculated successfully!")
     console.print("You can now run: quant generate-signals")
+
+@app.command("debug-signals")
+def debug_signals(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+):
+    """
+    Debug signal generation by checking available indicators.
+    """
+    console.print("[bold cyan]SIGNAL DEBUG - Checking Available Indicators[/bold cyan]")
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Get latest date
+    latest_query = "SELECT MAX(date) as max_date FROM technical_indicators"
+    latest_result = pd.read_sql_query(latest_query, eng)
+    latest_date = latest_result['max_date'].iloc[0]
+    
+    console.print(f"Latest date: {latest_date}")
+    
+    # Check what indicators we have for signal generation
+    signal_indicators = [
+        'rsi', 'bb_percent_b', 'bb_upper', 'bb_lower', 'bb_middle',
+        'relative_volume', 'atr_pct', 'return_252d', 'return_21d', 
+        'return_63d', 'hqm_score', 'zscore_5d', 'return_5d', 'return_1d'
+    ]
+    
+    indicators_str = "','".join(signal_indicators)
+    
+    query = f"""
+    SELECT 
+        indicator_name,
+        COUNT(DISTINCT symbol) as symbols_count,
+        COUNT(*) as total_records,
+        AVG(value) as avg_value,
+        MIN(value) as min_value,
+        MAX(value) as max_value
+    FROM technical_indicators
+    WHERE date = '{latest_date}'
+    AND indicator_name IN ('{indicators_str}')
+    GROUP BY indicator_name
+    ORDER BY symbols_count DESC
+    """
+    
+    indicators_df = pd.read_sql_query(query, eng)
+    
+    if indicators_df.empty:
+        console.print("[red]❌ No signal indicators found![/red]")
+        return
+        
+    # Display indicator availability
+    table = Table(title="Signal Indicators Availability")
+    table.add_column("Indicator", style="cyan")
+    table.add_column("Symbols", style="green")
+    table.add_column("Avg Value", style="yellow")
+    table.add_column("Range", style="magenta")
+    table.add_column("Status", style="white")
+    
+    for _, row in indicators_df.iterrows():
+        indicator = row['indicator_name']
+        symbols = row['symbols_count']
+        avg_val = row['avg_value']
+        min_val = row['min_value']
+        max_val = row['max_value']
+        
+        # Determine status
+        if symbols >= 45:  # We have ~50 symbols
+            status = "✅ Good"
+        elif symbols >= 20:
+            status = "⚠️ Partial"
+        else:
+            status = "❌ Poor"
+            
+        table.add_row(
+            indicator,
+            str(symbols),
+            f"{avg_val:.2f}" if pd.notna(avg_val) else "N/A",
+            f"{min_val:.2f} to {max_val:.2f}" if pd.notna(min_val) else "N/A",
+            status
+        )
+    
+    console.print(table)
+    
+    # Check for missing critical indicators
+    missing = set(signal_indicators) - set(indicators_df['indicator_name'].tolist())
+    if missing:
+        console.print(f"\n[red]❌ Missing indicators: {', '.join(missing)}[/red]")
+        console.print("[yellow]Run: quant calculate-features --universe --top-n 50[/yellow]")
+    else:
+        console.print("\n[green]✅ All signal indicators available![/green]")
+        
+    # Test signal generation with a few symbols
+    console.print("\n[bold]Testing Signal Generation:[/bold]")
+    
+    try:
+        # Test momentum signals
+        from .signals.momentum_signals import MomentumSignalGenerator
+        mom_gen = MomentumSignalGenerator(eng, s)
+        
+        # Get a few symbols for testing
+        test_symbols = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'TSLA']
+        test_features = mom_gen._fetch_features(latest_date, test_symbols)
+        
+        console.print(f"Momentum features fetched: {len(test_features)} symbols")
+        
+        if not test_features.empty:
+            # Show sample data
+            sample_table = Table(title="Sample Momentum Data")
+            sample_table.add_column("Symbol", style="cyan")
+            sample_table.add_column("HQM Score", style="green")
+            sample_table.add_column("12M Return", style="yellow")
+            sample_table.add_column("RSI", style="magenta")
+            
+            for _, row in test_features.head(5).iterrows():
+                sample_table.add_row(
+                    row['symbol'],
+                    f"{row.get('hqm_score', 0):.1f}",
+                    f"{row.get('momentum_12m', 0):.1%}",
+                    f"{row.get('rsi', 50):.1f}"
+                )
+            
+            console.print(sample_table)
+        
+        console.print("\n[green]✅ Signal generation test passed![/green]")
+        console.print("Run: quant generate-signals")
+        
+    except Exception as e:
+        console.print(f"\n[red]❌ Signal generation test failed: {e}[/red]")
+
+
+@app.command("diagnose-signals")
+def diagnose_signals(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    top_n: int = typer.Option(10, help="Number of top signals to show"),
+):
+    """
+    Diagnose signal generation step by step.
+    """
+    console.print("[bold cyan]SIGNAL GENERATION DIAGNOSIS[/bold cyan]")
+    console.print("=" * 70)
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Step 1: Test momentum signals
+    console.print("\n[bold]Step 1: Raw Momentum Signals[/bold]")
+    
+    try:
+        from .signals.momentum_signals import MomentumSignalGenerator
+        mom_gen = MomentumSignalGenerator(eng, s)
+        momentum_signals = mom_gen.generate_signals(top_n=30)
+        
+        console.print(f"Generated {len(momentum_signals)} momentum signals")
+        
+        # Show top momentum signals
+        mom_table = Table(title="Top Momentum Signals")
+        mom_table.add_column("Symbol", style="cyan")
+        mom_table.add_column("Type", style="green")
+        mom_table.add_column("Strength", style="yellow")
+        mom_table.add_column("HQM Score", style="magenta")
+        mom_table.add_column("12M Return", style="blue")
+        mom_table.add_column("RSI", style="white")
+        
+        # Sort by signal strength
+        sorted_mom = sorted(
+            momentum_signals.items(),
+            key=lambda x: x[1].signal_strength,
+            reverse=True
+        )
+        
+        for symbol, signal in sorted_mom[:top_n]:
+            signal_color = "🟢" if signal.signal_type == "long" else "🔴" if signal.signal_type == "short" else "⚪"
+            
+            mom_table.add_row(
+                symbol,
+                f"{signal_color} {signal.signal_type}",
+                f"{signal.signal_strength:.2f}",
+                f"{signal.hqm_score:.1f}",
+                f"{signal.momentum_12m:.1%}",
+                f"{signal.rsi:.1f}"
+            )
+        
+        console.print(mom_table)
+        
+    except Exception as e:
+        console.print(f"[red]Momentum signals failed: {e}[/red]")
+        return
+    
+    # Step 2: Test mean reversion signals
+    console.print("\n[bold]Step 2: Raw Mean Reversion Signals[/bold]")
+    
+    try:
+        from .signals.mean_reversion_signals import MeanReversionSignalGenerator
+        rev_gen = MeanReversionSignalGenerator(eng, s)
+        reversion_signals = rev_gen.generate_signals()
+        
+        console.print(f"Generated {len(reversion_signals)} mean reversion signals")
+        
+        # Show actionable reversion signals
+        actionable_rev = {s: sig for s, sig in reversion_signals.items() 
+                         if sig.signal_type != 'neutral' and sig.signal_strength > 0.2}
+        
+        if actionable_rev:
+            rev_table = Table(title="Top Mean Reversion Signals")
+            rev_table.add_column("Symbol", style="cyan")
+            rev_table.add_column("Type", style="green")
+            rev_table.add_column("Strength", style="yellow")
+            rev_table.add_column("Z-Score", style="magenta")
+            rev_table.add_column("RSI", style="blue")
+            
+            sorted_rev = sorted(
+                actionable_rev.items(),
+                key=lambda x: x[1].signal_strength,
+                reverse=True
+            )
+            
+            for symbol, signal in sorted_rev[:5]:
+                signal_color = "🟢" if signal.signal_type == "long" else "🔴"
+                
+                rev_table.add_row(
+                    symbol,
+                    f"{signal_color} {signal.signal_type}",
+                    f"{signal.signal_strength:.2f}",
+                    f"{signal.z_score:+.2f}",
+                    f"{signal.rsi:.1f}"
+                )
+            
+            console.print(rev_table)
+        else:
+            console.print("[yellow]No strong mean reversion signals[/yellow]")
+        
+    except Exception as e:
+        console.print(f"[red]Mean reversion signals failed: {e}[/red]")
+        reversion_signals = {}
+    
+    # Step 3: Test signal combination
+    console.print("\n[bold]Step 3: Combined Signals[/bold]")
+    
+    try:
+        from .signals.signal_combiner import SignalCombiner
+        from .analysis.regime_detector import RegimeDetector
+        
+        detector = RegimeDetector(eng)
+        combiner = SignalCombiner(eng, s, detector)
+        
+        combined_signals = combiner.combine_signals(
+            momentum_signals,
+            reversion_signals
+        )
+        
+        console.print(f"Generated {len(combined_signals)} combined signals")
+        
+        # Show actionable combined signals
+        actionable_combined = {s: sig for s, sig in combined_signals.items() 
+                              if sig.action != 'HOLD' and sig.signal_strength > 0.2}
+        
+        if actionable_combined:
+            comb_table = Table(title="Top Combined Signals")
+            comb_table.add_column("Symbol", style="cyan")
+            comb_table.add_column("Action", style="green")
+            comb_table.add_column("Strength", style="yellow")
+            comb_table.add_column("Momentum", style="magenta")
+            comb_table.add_column("Mean Rev", style="blue")
+            comb_table.add_column("Confidence", style="white")
+            
+            sorted_comb = sorted(
+                actionable_combined.items(),
+                key=lambda x: x[1].signal_strength,
+                reverse=True
+            )
+            
+            for symbol, signal in sorted_comb[:top_n]:
+                action_color = "🟢" if signal.action == "BUY" else "🔴"
+                
+                comb_table.add_row(
+                    symbol,
+                    f"{action_color} {signal.action}",
+                    f"{signal.signal_strength:.2f}",
+                    f"{signal.momentum_signal:+.2f}",
+                    f"{signal.mean_reversion_signal:+.2f}",
+                    f"{signal.confidence:.0%}"
+                )
+            
+            console.print(comb_table)
+        else:
+            console.print("[yellow]No actionable combined signals[/yellow]")
+            
+    except Exception as e:
+        console.print(f"[red]Signal combination failed: {e}[/red]")
+    
+    # Step 4: Recommendations
+    console.print("\n[bold]Step 4: Recommendations[/bold]")
+    
+    strong_momentum = sum(1 for s in momentum_signals.values() 
+                         if s.signal_type == 'long' and s.signal_strength > 0.5)
+    
+    console.print(f"Strong momentum signals: {strong_momentum}")
+    
+    if strong_momentum == 0:
+        console.print("[yellow]Issue: No strong momentum signals detected[/yellow]")
+        console.print("[green]Solutions:[/green]")
+        console.print("  1. Lower signal thresholds in momentum_signals.py")
+        console.print("  2. Adjust RSI overbought filter")
+        console.print("  3. Check if HQM scores are being used correctly")
+    
+    console.print("\n[green]✓[/green] Diagnosis complete!")
+    console.print("Apply fixes to momentum_signals.py and hybrid_strategy.py")
+
+@app.command("test-momentum")
+def test_momentum(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+):
+    """
+    Quick test of momentum signal generation with current thresholds.
+    """
+    console.print("[bold cyan]MOMENTUM SIGNAL TEST[/bold cyan]")
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Test specific high-quality stocks
+    test_symbols = ['NVDA', 'AVGO', 'GOOGL', 'MSFT', 'ORCL', 'AMD', 'VIX']
+    
+    try:
+        from .signals.momentum_signals import MomentumSignalGenerator
+        mom_gen = MomentumSignalGenerator(eng, s)
+        
+        # Get features for test symbols
+        latest_date = "2025-08-11"  # Use known date
+        features = mom_gen._fetch_features(latest_date, test_symbols)
+        
+        console.print(f"Fetched features for {len(features)} symbols")
+        
+        if features.empty:
+            console.print("[red]No features found[/red]")
+            return
+            
+        # Show raw features
+        features_table = Table(title="Raw Features (Before Signal Logic)")
+        features_table.add_column("Symbol", style="cyan")
+        features_table.add_column("HQM Score", style="green")
+        features_table.add_column("12M Return", style="yellow")
+        features_table.add_column("RSI", style="magenta")
+        features_table.add_column("Should Signal?", style="white")
+        
+        for _, row in features.iterrows():
+            symbol = row['symbol']
+            hqm = row.get('hqm_score', 0)
+            momentum_12m = row.get('momentum_12m', 0)
+            rsi = row.get('rsi', 50)
+            
+            # Manual signal logic test
+            should_signal = "🟢 YES" if hqm > 70 and momentum_12m > 0.2 and rsi < 85 else "❌ NO"
+            if rsi > 80:
+                should_signal += f" (RSI {rsi:.1f} > 80)"
+            
+            features_table.add_row(
+                symbol,
+                f"{hqm:.1f}",
+                f"{momentum_12m:.1%}",
+                f"{rsi:.1f}",
+                should_signal
+            )
+        
+        console.print(features_table)
+        
+        # Now test actual signal generation
+        console.print("\n[bold]Testing Actual Signal Generation:[/bold]")
+        signals = mom_gen.generate_signals(top_n=10)
+        
+        # Filter for our test symbols
+        test_signals = {s: sig for s, sig in signals.items() if s in test_symbols}
+        
+        if test_signals:
+            signals_table = Table(title="Generated Signals")
+            signals_table.add_column("Symbol", style="cyan")
+            signals_table.add_column("Type", style="green")
+            signals_table.add_column("Strength", style="yellow")
+            signals_table.add_column("Reasons", style="white")
+            
+            for symbol, signal in test_signals.items():
+                signal_color = "🟢" if signal.signal_type == "long" else "🔴" if signal.signal_type == "short" else "⚪"
+                
+                signals_table.add_row(
+                    symbol,
+                    f"{signal_color} {signal.signal_type}",
+                    f"{signal.signal_strength:.2f}",
+                    ", ".join(signal.reasons[:2])  # First 2 reasons
+                )
+            
+            console.print(signals_table)
+        else:
+            console.print("[red]❌ No signals generated for test symbols![/red]")
+            console.print("[yellow]This confirms signal thresholds are too high[/yellow]")
+            
+        # Show current thresholds being used
+        console.print("\n[bold]Current Signal Thresholds:[/bold]")
+        console.print("  RSI overbought filter: 85")
+        console.print("  Long signal threshold: 0.3")
+        console.print("  Signal strength multiplier: 0.7")
+        
+        console.print("\n[green]Apply the fixes to momentum_signals.py to see more signals![/green]")
+        
+    except Exception as e:
+        console.print(f"[red]Test failed: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+@app.command("show-config")
+def show_config(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    section: str = typer.Option("all", help="Config section: momentum, portfolio, regime, all"),
+):
+    """
+    Display current configuration parameters.
+    """
+    console.print("[bold cyan]CONFIGURATION VIEWER[/bold cyan]")
+    console.print("=" * 70)
+    
+    s = load_settings(config_path)
+    
+    if section in ["momentum", "all"]:
+        console.print("\n[bold]🎯 MOMENTUM SIGNAL PARAMETERS[/bold]")
+        
+        mom_config = s.momentum_signals
+        
+        # Signal weights table
+        weights_table = Table(title="Signal Combination Weights")
+        weights_table.add_column("Component", style="cyan")
+        weights_table.add_column("Weight", style="green")
+        
+        weights_table.add_row("HQM Score", f"{mom_config.weights.hqm:.0%}")
+        weights_table.add_row("Cross-Sectional", f"{mom_config.weights.cross_sectional:.0%}")
+        weights_table.add_row("Time-Series", f"{mom_config.weights.time_series:.0%}")
+        
+        console.print(weights_table)
+        
+        # Signal thresholds table
+        thresh_table = Table(title="Signal Thresholds")
+        thresh_table.add_column("Parameter", style="cyan")
+        thresh_table.add_column("Value", style="yellow")
+        thresh_table.add_column("Description", style="white")
+        
+        thresh_table.add_row(
+            "Long Signal", 
+            f"{mom_config.thresholds.long_signal:.2f}",
+            "Composite signal > this = LONG"
+        )
+        thresh_table.add_row(
+            "Short Signal", 
+            f"{mom_config.thresholds.short_signal:.2f}",
+            "Composite signal < this = SHORT"
+        )
+        thresh_table.add_row(
+            "Min Strength", 
+            f"{mom_config.thresholds.min_strength:.2f}",
+            "Minimum signal to consider"
+        )
+        thresh_table.add_row(
+            "RSI Overbought", 
+            str(mom_config.rsi_filters.overbought_threshold),
+            "Reduce momentum signals when RSI > this"
+        )
+        thresh_table.add_row(
+            "RSI Reduction", 
+            f"{mom_config.rsi_filters.reduction_factor:.0%}",
+            "Signal multiplier when RSI filtered"
+        )
+        thresh_table.add_row(
+            "Min HQM Score", 
+            f"{mom_config.hqm_requirements.min_score:.0f}",
+            "Minimum HQM score for consideration"
+        )
+        
+        console.print(thresh_table)
+    
+    if section in ["portfolio", "all"]:
+        console.print("\n[bold]💼 PORTFOLIO CONSTRUCTION[/bold]")
+        
+        port_config = s.portfolio
+        
+        # Portfolio limits table
+        limits_table = Table(title="Portfolio Limits")
+        limits_table.add_column("Parameter", style="cyan")
+        limits_table.add_column("Value", style="green")
+        limits_table.add_column("Description", style="white")
+        
+        limits_table.add_row(
+            "Max Positions", 
+            str(port_config.max_names),
+            "Maximum number of positions"
+        )
+        limits_table.add_row(
+            "Max Weight per Name", 
+            f"{port_config.max_weight_per_name:.0%}",
+            "Maximum % of gross exposure per position"
+        )
+        limits_table.add_row(
+            "Min Trade Size", 
+            f"${port_config.min_trade_notional:.0f}",
+            "Minimum dollar amount per trade"
+        )
+        limits_table.add_row(
+            "Momentum Base Size", 
+            f"{port_config.position_sizing.momentum_base_size:.0%}",
+            "Base position size for momentum trades"
+        )
+        limits_table.add_row(
+            "Mean Rev Base Size", 
+            f"{port_config.position_sizing.mean_rev_base_size:.0%}",
+            "Base position size for mean reversion"
+        )
+        
+        console.print(limits_table)
+        
+        # Regime exposure scaling
+        regime_table = Table(title="Exposure Scaling by Regime")
+        regime_table.add_column("Regime", style="cyan")
+        regime_table.add_column("Gross Exposure", style="green")
+        regime_table.add_column("Description", style="white")
+        
+        scaling = port_config.regime_exposure_scaling
+        regime_table.add_row("Strong Growth", f"{scaling.strong_growth:.0%}", "Low VIX, strong momentum")
+        regime_table.add_row("Growth", f"{scaling.growth:.0%}", "Moderate growth conditions")
+        regime_table.add_row("Neutral", f"{scaling.neutral:.0%}", "Mixed market signals")
+        regime_table.add_row("Dividend", f"{scaling.dividend:.0%}", "Defensive positioning")
+        regime_table.add_row("Crisis", f"{scaling.crisis:.0%}", "High VIX, risk-off")
+        
+        console.print(regime_table)
+    
+    if section in ["regime", "all"]:
+        console.print("\n[bold]📊 REGIME DETECTION[/bold]")
+        
+        regime_config = s.regime_detection
+        
+        # VIX thresholds
+        vix_table = Table(title="VIX Regime Thresholds")
+        vix_table.add_column("Regime", style="cyan")
+        vix_table.add_column("VIX Range", style="yellow")
+        
+        vix_table.add_row("Strong Growth", f"< {regime_config.vix_thresholds.strong_growth}")
+        vix_table.add_row("Growth", f"< {regime_config.vix_thresholds.growth_max}")
+        vix_table.add_row("Neutral", f"{regime_config.vix_thresholds.neutral_range[0]}-{regime_config.vix_thresholds.neutral_range[1]}")
+        vix_table.add_row("Dividend", f"> {regime_config.vix_thresholds.dividend_min}")
+        vix_table.add_row("Crisis", f"> {regime_config.vix_thresholds.crisis_min}")
+        
+        console.print(vix_table)
+        
+        # Strategy allocation by regime
+        if hasattr(s, 'regime_strategy_allocation'):
+            alloc_table = Table(title="Strategy Allocation by Regime")
+            alloc_table.add_column("Regime", style="cyan")
+            alloc_table.add_column("Momentum", style="green")
+            alloc_table.add_column("Mean Rev", style="yellow")
+            alloc_table.add_column("Cash", style="red")
+            
+            alloc = s.regime_strategy_allocation
+            alloc_table.add_row(
+                "Strong Growth", 
+                f"{alloc.strong_growth.momentum_weight:.0%}",
+                f"{alloc.strong_growth.mean_reversion_weight:.0%}",
+                f"{alloc.strong_growth.cash_weight:.0%}"
+            )
+            alloc_table.add_row(
+                "Growth", 
+                f"{alloc.growth.momentum_weight:.0%}",
+                f"{alloc.growth.mean_reversion_weight:.0%}",
+                f"{alloc.growth.cash_weight:.0%}"
+            )
+            alloc_table.add_row(
+                "Neutral", 
+                f"{alloc.neutral.momentum_weight:.0%}",
+                f"{alloc.neutral.mean_reversion_weight:.0%}",
+                f"{alloc.neutral.cash_weight:.0%}"
+            )
+            alloc_table.add_row(
+                "Dividend", 
+                f"{alloc.dividend.momentum_weight:.0%}",
+                f"{alloc.dividend.mean_reversion_weight:.0%}",
+                f"{alloc.dividend.cash_weight:.0%}"
+            )
+            alloc_table.add_row(
+                "Crisis", 
+                f"{alloc.crisis.momentum_weight:.0%}",
+                f"{alloc.crisis.mean_reversion_weight:.0%}",
+                f"{alloc.crisis.cash_weight:.0%}"
+            )
+            
+            console.print(alloc_table)
+    
+    console.print(f"\n[dim]Configuration loaded from: {config_path}[/dim]")
+    console.print("[green]✓[/green] To modify parameters, edit the YAML file and regenerate signals")
+
+@app.command("tune-momentum")
+def tune_momentum(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    long_threshold: Optional[float] = typer.Option(None, help="Long signal threshold (0.1-0.8)"),
+    rsi_threshold: Optional[int] = typer.Option(None, help="RSI overbought threshold (70-90)"),
+    min_hqm: Optional[float] = typer.Option(None, help="Minimum HQM score (40-80)"),
+    dry_run: bool = typer.Option(True, help="Show changes without saving"),
+):
+    """
+    Tune momentum signal parameters interactively.
+    """
+    console.print("[bold cyan]MOMENTUM PARAMETER TUNING[/bold cyan]")
+    console.print("=" * 70)
+    
+    s = load_settings(config_path)
+    
+    # Show current values
+    console.print("\n[bold]Current Parameters:[/bold]")
+    console.print(f"  Long Signal Threshold: {s.momentum_signals.thresholds.long_signal:.2f}")
+    console.print(f"  RSI Overbought Filter: {s.momentum_signals.rsi_filters.overbought_threshold}")
+    console.print(f"  Minimum HQM Score: {s.momentum_signals.hqm_requirements.min_score:.0f}")
+    
+    # Apply changes
+    changes_made = []
+    
+    if long_threshold is not None:
+        if 0.1 <= long_threshold <= 0.8:
+            old_val = s.momentum_signals.thresholds.long_signal
+            s.momentum_signals.thresholds.long_signal = long_threshold
+            changes_made.append(f"Long threshold: {old_val:.2f} → {long_threshold:.2f}")
+        else:
+            console.print("[red]Long threshold must be between 0.1 and 0.8[/red]")
+            return
+    
+    if rsi_threshold is not None:
+        if 70 <= rsi_threshold <= 90:
+            old_val = s.momentum_signals.rsi_filters.overbought_threshold
+            s.momentum_signals.rsi_filters.overbought_threshold = rsi_threshold
+            changes_made.append(f"RSI threshold: {old_val} → {rsi_threshold}")
+        else:
+            console.print("[red]RSI threshold must be between 70 and 90[/red]")
+            return
+    
+    if min_hqm is not None:
+        if 40 <= min_hqm <= 80:
+            old_val = s.momentum_signals.hqm_requirements.min_score
+            s.momentum_signals.hqm_requirements.min_score = min_hqm
+            changes_made.append(f"Min HQM: {old_val:.0f} → {min_hqm:.0f}")
+        else:
+            console.print("[red]Min HQM must be between 40 and 80[/red]")
+            return
+    
+    if not changes_made:
+        console.print("[yellow]No changes specified. Use --help to see available parameters.[/yellow]")
+        return
+    
+    # Show proposed changes
+    console.print("\n[bold]Proposed Changes:[/bold]")
+    for change in changes_made:
+        console.print(f"  • {change}")
+    
+    if dry_run:
+        console.print("\n[yellow]DRY RUN - No changes saved[/yellow]")
+        console.print("Use --no-dry-run to apply changes")
+    else:
+        # Save changes back to YAML
+        import yaml
+        
+        # Convert pydantic model to dict
+        config_dict = s.dict()
+        
+        with open(config_path, 'w') as f:
+            yaml.dump(config_dict, f, default_flow_style=False, indent=2)
+        
+        console.print(f"\n[green]✓[/green] Changes saved to {config_path}")
+        console.print("Run 'quant generate-signals' to test new parameters")
 
 if __name__ == "__main__":
     app()

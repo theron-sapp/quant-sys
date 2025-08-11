@@ -160,79 +160,71 @@ class HybridStrategy:
     
     def _calculate_allocation(self, regime_score) -> PortfolioAllocation:
         """
-        Calculate portfolio allocation based on regime.
-        
-        Smoothly transitions between strategies to avoid whipsaw.
+        Calculate portfolio allocation based on regime using CONFIG VALUES.
         """
         regime = regime_score.regime
         confidence = regime_score.confidence
         
-        # Base allocations by regime
+        # Get regime-specific allocation from CONFIG
+        regime_allocations = self.config.regime_strategy_allocation
+        
         if regime == MarketRegime.STRONG_GROWTH:
-            base_allocation = {
-                'momentum': 0.70,
-                'dividend': 0.10,
-                'mean_reversion': 0.20,
-                'cash': 0.00
-            }
-            gross_exposure = 1.0  # Full exposure
-            
+            base_allocation = regime_allocations.strong_growth
         elif regime == MarketRegime.GROWTH:
-            base_allocation = {
-                'momentum': 0.50,
-                'dividend': 0.20,
-                'mean_reversion': 0.30,
-                'cash': 0.00
-            }
-            gross_exposure = 0.90
-            
+            base_allocation = regime_allocations.growth
         elif regime == MarketRegime.NEUTRAL:
-            base_allocation = {
-                'momentum': 0.30,
-                'dividend': 0.30,
-                'mean_reversion': 0.40,
-                'cash': 0.00
-            }
-            gross_exposure = 0.80
-            
+            base_allocation = regime_allocations.neutral
         elif regime == MarketRegime.DIVIDEND:
-            base_allocation = {
-                'momentum': 0.20,
-                'dividend': 0.50,
-                'mean_reversion': 0.20,
-                'cash': 0.10
-            }
-            gross_exposure = 0.70
-            
+            base_allocation = regime_allocations.dividend
         else:  # CRISIS
-            base_allocation = {
-                'momentum': 0.05,
-                'dividend': 0.35,
-                'mean_reversion': 0.10,
-                'cash': 0.50
-            }
-            gross_exposure = 0.30  # Minimal exposure
-            
-        # Adjust for confidence
-        if confidence < 0.70:
+            base_allocation = regime_allocations.crisis
+        
+        # Get gross exposure scaling from CONFIG
+        exposure_scaling = self.config.portfolio.regime_exposure_scaling
+        
+        if regime == MarketRegime.STRONG_GROWTH:
+            gross_exposure = exposure_scaling.strong_growth
+        elif regime == MarketRegime.GROWTH:
+            gross_exposure = exposure_scaling.growth
+        elif regime == MarketRegime.NEUTRAL:
+            gross_exposure = exposure_scaling.neutral
+        elif regime == MarketRegime.DIVIDEND:
+            gross_exposure = exposure_scaling.dividend
+        else:  # CRISIS
+            gross_exposure = exposure_scaling.crisis
+        
+        # Adjust for confidence using CONFIG THRESHOLD
+        min_confidence = self.config.regime_detection.persistence.confidence_threshold
+        if confidence < min_confidence:
             # Low confidence - move toward neutral allocation
-            neutral = {'momentum': 0.33, 'dividend': 0.33, 'mean_reversion': 0.34, 'cash': 0.00}
+            neutral_alloc = regime_allocations.neutral
             
-            blend_factor = confidence / 0.70
-            for key in base_allocation:
-                base_allocation[key] = (
-                    base_allocation[key] * blend_factor +
-                    neutral[key] * (1 - blend_factor)
-                )
-                
+            blend_factor = confidence / min_confidence
+            final_momentum = (
+                base_allocation.momentum_weight * blend_factor +
+                neutral_alloc.momentum_weight * (1 - blend_factor)
+            )
+            final_mean_rev = (
+                base_allocation.mean_reversion_weight * blend_factor +
+                neutral_alloc.mean_reversion_weight * (1 - blend_factor)
+            )
+            final_cash = (
+                base_allocation.cash_weight * blend_factor +
+                neutral_alloc.cash_weight * (1 - blend_factor)
+            )
+        else:
+            final_momentum = base_allocation.momentum_weight
+            final_mean_rev = base_allocation.mean_reversion_weight
+            final_cash = base_allocation.cash_weight
+        
         # Check if rebalance needed
         rebalance_needed = self._check_rebalance_trigger(regime_score)
         
         return PortfolioAllocation(
-            momentum_weight=base_allocation['momentum'],
-            dividend_weight=base_allocation['dividend'],
-            mean_reversion_weight=base_allocation['mean_reversion'],
-            cash_weight=base_allocation['cash'],
+            momentum_weight=final_momentum,
+            dividend_weight=0,  # Not using dividend strategy in this version
+            mean_reversion_weight=final_mean_rev,
+            cash_weight=final_cash,
             gross_exposure=gross_exposure,
             leverage=1.0,  # No leverage for now
             regime=regime,
@@ -241,18 +233,24 @@ class HybridStrategy:
         )
     
     def _generate_trade_signals(
-        self,
-        combined_signals: Dict,
-        allocation: PortfolioAllocation,
-        current_positions: Optional[Dict]
+    self,
+    combined_signals: Dict,
+    allocation: PortfolioAllocation,
+    current_positions: Optional[Dict]
     ) -> List[TradeSignal]:
         """
-        Generate final trade signals based on combined signals and allocation.
+        Generate final trade signals using CONFIG VALUES for position sizing.
         """
         trade_signals = []
         
-        # Calculate available capital
-        available_capital = self.gross_exposure_cap * allocation.gross_exposure
+        # Use CONFIG VALUES for capital and limits
+        available_capital = self.config.gross_exposure_cap * allocation.gross_exposure
+        max_positions = self.config.portfolio.max_names
+        min_trade_notional = self.config.portfolio.min_trade_notional
+        
+        # Get position sizing config
+        pos_sizing = self.config.portfolio.position_sizing
+        momentum_config = self.config.momentum_signals
         
         # Sort signals by strength
         sorted_signals = sorted(
@@ -264,37 +262,45 @@ class HybridStrategy:
         # Track capital allocation
         capital_allocated = 0
         positions_added = 0
-        max_positions = 30
+        
+        # Use CONFIG THRESHOLD for minimum signal strength
+        min_signal_strength = momentum_config.thresholds.min_strength
         
         for symbol, signal in sorted_signals:
-            # Skip if no action needed
-            if signal.action == 'HOLD':
+            # Skip weak signals using CONFIG THRESHOLD
+            if signal.action == 'HOLD' and signal.signal_strength < min_signal_strength:
                 continue
                 
             # Check position limit
             if positions_added >= max_positions:
                 break
                 
-            # Calculate position size based on signal and allocation
-            base_position_size = signal.suggested_position_size * available_capital
-            
-            # Adjust for strategy allocation
+            # Calculate position size using CONFIG VALUES
             if signal.momentum_signal > signal.mean_reversion_signal:
                 # Momentum-driven signal
+                base_position_size = available_capital * pos_sizing.momentum_base_size
                 position_size = base_position_size * allocation.momentum_weight
                 strategy = 'momentum'
                 max_holding = 63  # 3 months for momentum
                 
             else:
-                # Mean reversion signal
+                # Mean reversion signal  
+                base_position_size = available_capital * pos_sizing.mean_rev_base_size
                 position_size = base_position_size * allocation.mean_reversion_weight
                 strategy = 'mean_reversion'
                 max_holding = 21  # 3 weeks for mean reversion
                 
+            # Scale position by signal strength using CONFIG BOUNDS
+            scaling_factor = max(
+                pos_sizing.min_position_scaling,
+                min(signal.signal_strength, pos_sizing.max_position_scaling)
+            )
+            position_size = position_size * scaling_factor
+            
             # Check capital constraint
             if capital_allocated + position_size > available_capital:
                 position_size = available_capital - capital_allocated
-                if position_size < 100:  # Minimum position size
+                if position_size < min_trade_notional:  # Use CONFIG minimum
                     break
                     
             # Get current price
@@ -307,8 +313,8 @@ class HybridStrategy:
             if shares == 0:
                 continue
                 
-            # Determine action
-            if signal.action == 'BUY':
+            # Accept signals based on CONFIG THRESHOLDS
+            if signal.action in ['BUY', 'HOLD'] and signal.signal_strength > min_signal_strength:
                 action = 'BUY'
             elif signal.action == 'SELL':
                 action = 'SELL'
@@ -323,12 +329,12 @@ class HybridStrategy:
                 shares=abs(shares),
                 price=current_price,
                 position_size=abs(shares * current_price),
-                position_size_pct=position_size / self.gross_exposure_cap,
+                position_size_pct=position_size / self.config.gross_exposure_cap,
                 strategy=strategy,
                 signal_strength=signal.signal_strength,
                 confidence=signal.confidence,
                 stop_loss=current_price * (1 - signal.stop_loss_pct),
-                take_profit=None,  # Can be added based on strategy
+                take_profit=None,
                 max_holding_days=max_holding,
                 reasons=signal.reasons
             )
@@ -336,6 +342,10 @@ class HybridStrategy:
             trade_signals.append(trade_signal)
             capital_allocated += position_size
             positions_added += 1
+            
+            # Log signal generation for debugging
+            logger.info(f"Generated signal: {symbol} {action} {shares} shares "
+                    f"(${position_size:.0f}, strength: {signal.signal_strength:.2f})")
             
         return trade_signals
     

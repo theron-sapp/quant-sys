@@ -101,26 +101,6 @@ class Signals(BaseModel):
     risk_filters: RiskFilters = Field(default_factory=RiskFilters)
 
 
-# ============================================================================
-# PORTFOLIO CONFIGURATION
-# ============================================================================
-
-class VolatilityScaling(BaseModel):
-    """Volatility scaling configuration."""
-    ewma_lambda: float = 0.94
-    floor_gross: float = 0.30
-    cap_gross: float = 1.00
-
-
-class Portfolio(BaseModel):
-    """Portfolio construction configuration."""
-    max_names: int = 30
-    max_weight_per_name: float = 0.08
-    max_sector_weight: float = 0.25
-    min_trade_notional: float = 100
-    turnover_cap_weekly: float = 0.40
-    volatility_scaling: VolatilityScaling = Field(default_factory=VolatilityScaling)
-
 
 # ============================================================================
 # OPTIONS OVERLAY
@@ -158,9 +138,12 @@ class OptionsOverlay(BaseModel):
 # ============================================================================
 
 class VixThresholds(BaseModel):
-    """VIX thresholds for regime detection."""
+    """Enhanced VIX thresholds for regime detection."""
+    strong_growth: int = 15
     growth_max: int = 20
+    neutral_range: List[int] = Field(default_factory=lambda: [20, 30])
     dividend_min: int = 30
+    crisis_min: int = 40
 
 
 class SignalWeights(BaseModel):
@@ -225,11 +208,147 @@ class StrategyAllocation(BaseModel):
 
 
 # ============================================================================
+# LOADER FUNCTION
+# ============================================================================
+
+# ==============================================================================
+# SIGNAL GENERATION CONFIGURATION CLASSES
+# ==============================================================================
+
+class ZScoreThresholds(BaseModel):
+    """Z-score thresholds for mean reversion signals."""
+    strong_long: float = -1.5
+    moderate_long: float = -0.8
+    strong_short: float = 1.5
+    moderate_short: float = 0.8
+
+class RSIThresholds(BaseModel):
+    """RSI thresholds for technical analysis."""
+    oversold: int = 30
+    overbought: int = 70
+    extreme_oversold: int = 20
+    extreme_overbought: int = 80
+
+class MeanReversion(BaseModel):
+    """Enhanced mean reversion signal configuration."""
+    lookback_days: int = 5
+    z_entry: float = 1.0
+    weight: float = 0.15
+    z_score_thresholds: ZScoreThresholds = Field(default_factory=ZScoreThresholds)
+    rsi_thresholds: RSIThresholds = Field(default_factory=RSIThresholds)
+
+class RiskFilters(BaseModel):
+    """Enhanced risk filter configuration."""
+    vix_percentile_lookback: int = 60
+    vix_block_above_pct: int = 85
+    max_volatility: float = 0.40
+    min_liquidity: float = 1000000
+
+class MomentumWeights(BaseModel):
+    """Momentum signal combination weights."""
+    hqm: float = 0.40
+    cross_sectional: float = 0.35
+    time_series: float = 0.25
+
+class MomentumThresholds(BaseModel):
+    """Momentum signal strength thresholds."""
+    long_signal: float = 0.30
+    short_signal: float = -0.20
+    min_strength: float = 0.20
+
+class MomentumRSIFilters(BaseModel):
+    """RSI filters for momentum signals."""
+    overbought_threshold: int = 85
+    oversold_threshold: int = 15
+    reduction_factor: float = 0.70
+
+class HQMRequirements(BaseModel):
+    """High-Quality Momentum requirements."""
+    min_score: float = 60
+    top_percentile: int = 20
+
+class MomentumThresholdsDetailed(BaseModel):
+    """Detailed momentum return thresholds."""
+    strong_positive: float = 0.20
+    moderate_positive: float = 0.10
+    weak_negative: float = -0.10
+    strong_negative: float = -0.20
+
+class MomentumSignals(BaseModel):
+    """Comprehensive momentum signal configuration."""
+    weights: MomentumWeights = Field(default_factory=MomentumWeights)
+    thresholds: MomentumThresholds = Field(default_factory=MomentumThresholds)
+    rsi_filters: MomentumRSIFilters = Field(default_factory=MomentumRSIFilters)
+    hqm_requirements: HQMRequirements = Field(default_factory=HQMRequirements)
+    momentum_thresholds: MomentumThresholdsDetailed = Field(default_factory=MomentumThresholdsDetailed)
+
+class PositionSizing(BaseModel):
+    """Position sizing configuration."""
+    momentum_base_size: float = 0.08
+    mean_rev_base_size: float = 0.06
+    min_position_scaling: float = 0.50
+    max_position_scaling: float = 1.20
+
+class RegimeExposureScaling(BaseModel):
+    """Risk scaling by market regime."""
+    strong_growth: float = 1.00
+    growth: float = 0.90
+    neutral: float = 0.70
+    dividend: float = 0.50
+    crisis: float = 0.30
+
+class RegimeAllocation(BaseModel):
+    """Strategy allocation for a specific regime."""
+    momentum_weight: float
+    mean_reversion_weight: float
+    cash_weight: float
+
+class RegimeStrategyAllocation(BaseModel):
+    """Strategy allocation by market regime."""
+    strong_growth: RegimeAllocation = Field(default_factory=lambda: RegimeAllocation(
+        momentum_weight=0.70, mean_reversion_weight=0.20, cash_weight=0.00
+    ))
+    growth: RegimeAllocation = Field(default_factory=lambda: RegimeAllocation(
+        momentum_weight=0.50, mean_reversion_weight=0.30, cash_weight=0.00
+    ))
+    neutral: RegimeAllocation = Field(default_factory=lambda: RegimeAllocation(
+        momentum_weight=0.30, mean_reversion_weight=0.40, cash_weight=0.00
+    ))
+    dividend: RegimeAllocation = Field(default_factory=lambda: RegimeAllocation(
+        momentum_weight=0.20, mean_reversion_weight=0.20, cash_weight=0.10
+    ))
+    crisis: RegimeAllocation = Field(default_factory=lambda: RegimeAllocation(
+        momentum_weight=0.05, mean_reversion_weight=0.10, cash_weight=0.50
+    ))
+
+# ============================================================================
+# PORTFOLIO CONFIGURATION
+# ============================================================================
+
+class VolatilityScaling(BaseModel):
+    """Volatility scaling configuration."""
+    ewma_lambda: float = 0.94
+    floor_gross: float = 0.30
+    cap_gross: float = 1.00
+
+
+class Portfolio(BaseModel):
+    """Portfolio construction configuration."""
+    max_names: int = 25
+    max_weight_per_name: float = 0.08
+    max_sector_weight: float = 0.25
+    min_trade_notional: float = 500
+    turnover_cap_weekly: float = 0.40
+    position_sizing: PositionSizing = Field(default_factory=PositionSizing)
+    regime_exposure_scaling: RegimeExposureScaling = Field(default_factory=RegimeExposureScaling)
+    volatility_scaling: VolatilityScaling = Field(default_factory=VolatilityScaling)
+
+# ============================================================================
 # MAIN SETTINGS CLASS
 # ============================================================================
 
 class Settings(BaseModel):
-    """Main settings configuration with all components."""
+    """Enhanced main settings configuration."""
     # Core settings
     capital_base: float
     gross_exposure_cap: float
@@ -247,11 +366,10 @@ class Settings(BaseModel):
     regime_detection: RegimeDetection = Field(default_factory=RegimeDetection)
     risk_management: RiskManagement = Field(default_factory=RiskManagement)
     strategy_allocation: StrategyAllocation = Field(default_factory=StrategyAllocation)
-
-
-# ============================================================================
-# LOADER FUNCTION
-# ============================================================================
+    
+    # NEW: Enhanced signal configurations
+    momentum_signals: MomentumSignals = Field(default_factory=MomentumSignals)
+    regime_strategy_allocation: RegimeStrategyAllocation = Field(default_factory=RegimeStrategyAllocation)
 
 def load_settings(yaml_path: str | Path) -> Settings:
     """
