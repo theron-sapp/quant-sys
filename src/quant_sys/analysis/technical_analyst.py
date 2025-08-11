@@ -150,6 +150,16 @@ class TechnicalAnalyst:
             )
             features = pd.concat([features, momentum_df], axis=1)
             
+            # IMPORTANT: Also create momentum_XXXd columns from return_XXXd
+            # This ensures we have both naming conventions
+            for period in [21, 63, 126, 252]:
+                return_col = f'return_{period}d'
+                momentum_col = f'momentum_{period}d'
+                
+                # If we have the return but not the momentum, create it
+                if return_col in features.columns and momentum_col not in features.columns:
+                    features[momentum_col] = features[return_col]
+            
             # 9. Volatility measures
             if 'return_1d' in features.columns:
                 features['realized_vol_21d'] = calculate_realized_volatility(

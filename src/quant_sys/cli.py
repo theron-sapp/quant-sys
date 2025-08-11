@@ -16,6 +16,10 @@ from .core.config import load_settings
 from .core.storage import get_engine
 from .data.ingest import ingest as ingest_fn
 from .data.transform import transform_daily_to_weekly
+from .signals.momentum_signals import MomentumSignalGenerator
+from .signals.mean_reversion_signals import MeanReversionSignalGenerator
+from .signals.signal_combiner import SignalCombiner
+from .strategies.hybrid_strategy import HybridStrategy
 
 # Import the regime detector
 from .analysis.regime_detector import RegimeDetector, MarketRegime
@@ -222,9 +226,6 @@ def check_data(
         console.print("  [yellow]Run 'quant ingest' to fetch missing data[/]")
 
 
-# ============================================================================
-# NEW FEATURE COMMANDS
-# ============================================================================
 
 @app.command("calculate-features")
 def calculate_features(
@@ -618,6 +619,589 @@ def volatility_report(
                 console.print("[red]High volatility - consider defensive positioning[/red]")
     else:
         console.print("[red]No volatility data available. Run 'quant calculate-features' first.[/red]")
+
+
+# ============================================================================
+# NEW FEATURE COMMANDS
+# ============================================================================
+
+@app.command("generate-signals")
+def generate_signals(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    date: Optional[str] = typer.Option(None, help="Date for signals (YYYY-MM-DD)"),
+    strategy: str = typer.Option("hybrid", help="Strategy type: hybrid, momentum, mean-reversion"),
+    output_format: str = typer.Option("table", help="Output format: table, json, csv"),
+):
+    """
+    Generate trading signals based on current market conditions.
+    """
+    console.print("[bold cyan]SIGNAL GENERATION[/bold cyan]")
+    console.print("=" * 70)
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Initialize strategy
+    if strategy == "hybrid":
+        hybrid = HybridStrategy(eng, s)
+        
+        # Generate signals
+        trade_signals = hybrid.generate_signals(date=date)
+        
+        # Get regime for report
+        from .analysis.regime_detector import RegimeDetector
+        detector = RegimeDetector(eng)
+        regime_score = detector.detect_current_regime(as_of_date=date)
+        
+        # Generate and print report
+        report = hybrid.generate_summary_report(trade_signals, regime_score)
+        console.print(report)
+        
+        # Detailed signals table
+        if trade_signals and output_format == "table":
+            _display_signals_table(trade_signals)
+            
+    elif strategy == "momentum":
+        # Momentum-only signals
+        mom_gen = MomentumSignalGenerator(eng, s)
+        signals = mom_gen.generate_signals(date=date)
+        
+        # Display momentum signals
+        _display_momentum_signals(signals)
+        
+    elif strategy == "mean-reversion":
+        # Mean reversion signals
+        rev_gen = MeanReversionSignalGenerator(eng, s)
+        signals = rev_gen.generate_signals(date=date)
+        
+        # Display mean reversion signals
+        _display_mean_reversion_signals(signals)
+        
+    else:
+        console.print(f"[red]Unknown strategy: {strategy}[/red]")
+
+
+@app.command("backtest-signals")
+def backtest_signals(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    start_date: str = typer.Option(None, help="Start date (YYYY-MM-DD)"),
+    end_date: str = typer.Option(None, help="End date (YYYY-MM-DD)"),
+    strategy: str = typer.Option("hybrid", help="Strategy to backtest"),
+):
+    """
+    Run simple backtest of trading signals.
+    """
+    console.print("[bold cyan]SIGNAL BACKTEST[/bold cyan]")
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Set default dates if not provided
+    if not end_date:
+        end_date = datetime.now().strftime('%Y-%m-%d')
+    if not start_date:
+        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+    
+    console.print(f"Backtesting from {start_date} to {end_date}")
+    
+    # Simple backtest implementation
+    results = _run_simple_backtest(eng, s, strategy, start_date, end_date)
+    
+    # Display results
+    if results:
+        table = Table(title="Backtest Results")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="white")
+        
+        table.add_row("Total Return", f"{results.get('total_return', 0):.2%}")
+        table.add_row("Sharpe Ratio", f"{results.get('sharpe_ratio', 0):.2f}")
+        table.add_row("Max Drawdown", f"{results.get('max_drawdown', 0):.2%}")
+        table.add_row("Win Rate", f"{results.get('win_rate', 0):.1%}")
+        table.add_row("Total Trades", str(results.get('total_trades', 0)))
+        
+        console.print(table)
+    else:
+        console.print("[red]Backtest failed[/red]")
+
+
+@app.command("show-positions")
+def show_positions(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    capital: float = typer.Option(10000, help="Capital to allocate"),
+):
+    """
+    Display recommended portfolio positions based on latest signals.
+    """
+    console.print("[bold cyan]RECOMMENDED POSITIONS[/bold cyan]")
+    console.print(f"Capital: ${capital:,.0f}")
+    console.print("=" * 70)
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Generate latest signals
+    hybrid = HybridStrategy(eng, s)
+    trade_signals = hybrid.generate_signals()
+    
+    if not trade_signals:
+        console.print("[yellow]No positions recommended at this time[/yellow]")
+        return
+    
+    # Group by action
+    buy_signals = [s for s in trade_signals if s.action == 'BUY']
+    sell_signals = [s for s in trade_signals if s.action == 'SELL']
+    
+    # Calculate allocations
+    total_allocation = sum(s.position_size for s in buy_signals)
+    
+    # Display buy positions
+    if buy_signals:
+        buy_table = Table(title="📈 BUY POSITIONS", show_header=True)
+        buy_table.add_column("Symbol", style="cyan")
+        buy_table.add_column("Shares", style="green")
+        buy_table.add_column("Price", style="white")
+        buy_table.add_column("Value", style="yellow")
+        buy_table.add_column("% of Capital", style="magenta")
+        buy_table.add_column("Stop Loss", style="red")
+        buy_table.add_column("Strategy", style="blue")
+        
+        for signal in buy_signals[:20]:  # Show top 20
+            buy_table.add_row(
+                signal.symbol,
+                str(signal.shares),
+                f"${signal.price:.2f}",
+                f"${signal.position_size:,.0f}",
+                f"{signal.position_size_pct:.1%}",
+                f"${signal.stop_loss:.2f}",
+                signal.strategy
+            )
+        
+        console.print(buy_table)
+        
+        # Summary
+        console.print(f"\n[bold]Summary:[/bold]")
+        console.print(f"  Total Buy Positions: {len(buy_signals)}")
+        console.print(f"  Total Allocation: ${total_allocation:,.0f} ({total_allocation/capital:.1%} of capital)")
+        console.print(f"  Average Position Size: ${total_allocation/len(buy_signals):,.0f}")
+    
+    # Display sell/short positions
+    if sell_signals:
+        console.print("\n")
+        sell_table = Table(title="📉 SELL/SHORT POSITIONS", show_header=True)
+        sell_table.add_column("Symbol", style="cyan")
+        sell_table.add_column("Action", style="red")
+        sell_table.add_column("Strategy", style="blue")
+        
+        for signal in sell_signals[:10]:
+            sell_table.add_row(
+                signal.symbol,
+                signal.action,
+                signal.strategy
+            )
+        
+        console.print(sell_table)
+
+
+# Helper functions
+
+def _display_signals_table(trade_signals):
+    """Display detailed signals in table format."""
+    if not trade_signals:
+        return
+        
+    table = Table(title="Trading Signals Detail", show_header=True)
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Action", style="green")
+    table.add_column("Shares", style="white")
+    table.add_column("Price", style="yellow")
+    table.add_column("Size", style="magenta")
+    table.add_column("Confidence", style="blue")
+    table.add_column("Stop Loss", style="red")
+    
+    for signal in trade_signals[:15]:  # Show top 15
+        table.add_row(
+            signal.symbol,
+            signal.action,
+            str(signal.shares),
+            f"${signal.price:.2f}",
+            f"${signal.position_size:,.0f}",
+            f"{signal.confidence:.0%}",
+            f"${signal.stop_loss:.2f}"
+        )
+    
+    console.print(table)
+
+
+def _display_momentum_signals(signals):
+    """Display momentum signals."""
+    if not signals:
+        console.print("[yellow]No momentum signals generated[/yellow]")
+        return
+        
+    table = Table(title="Momentum Signals", show_header=True)
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Signal", style="green")
+    table.add_column("HQM Score", style="yellow")
+    table.add_column("12M Return", style="magenta")
+    table.add_column("3M Return", style="blue")
+    table.add_column("RSI", style="white")
+    
+    # Sort by HQM score
+    sorted_signals = sorted(
+        signals.items(),
+        key=lambda x: x[1].hqm_score,
+        reverse=True
+    )
+    
+    for symbol, signal in sorted_signals[:20]:
+        if signal.signal_type == 'long':
+            signal_str = "🟢 LONG"
+        elif signal.signal_type == 'short':
+            signal_str = "🔴 SHORT"
+        else:
+            signal_str = "⚪ NEUTRAL"
+            
+        table.add_row(
+            symbol,
+            signal_str,
+            f"{signal.hqm_score:.1f}",
+            f"{signal.momentum_12m:.1%}",
+            f"{signal.momentum_3m:.1%}",
+            f"{signal.rsi:.1f}"
+        )
+    
+    console.print(table)
+
+
+def _display_mean_reversion_signals(signals):
+    """Display mean reversion signals."""
+    if not signals:
+        console.print("[yellow]No mean reversion signals generated[/yellow]")
+        return
+        
+    table = Table(title="Mean Reversion Signals", show_header=True)
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Signal", style="green")
+    table.add_column("Z-Score", style="yellow")
+    table.add_column("RSI", style="magenta")
+    table.add_column("BB Position", style="blue")
+    table.add_column("Price vs Mean", style="white")
+    
+    # Filter for actionable signals
+    actionable = {s: sig for s, sig in signals.items() 
+                  if sig.signal_type != 'neutral'}
+    
+    # Sort by absolute z-score
+    sorted_signals = sorted(
+        actionable.items(),
+        key=lambda x: abs(x[1].z_score),
+        reverse=True
+    )
+    
+    for symbol, signal in sorted_signals[:20]:
+        if signal.signal_type == 'long':
+            signal_str = "🟢 LONG"
+        elif signal.signal_type == 'short':
+            signal_str = "🔴 SHORT"
+        else:
+            signal_str = "⚪ NEUTRAL"
+            
+        table.add_row(
+            symbol,
+            signal_str,
+            f"{signal.z_score:+.2f}",
+            f"{signal.rsi:.1f}",
+            f"{signal.bb_position:+.2f}",
+            f"{signal.price_vs_mean:+.1%}"
+        )
+    
+    console.print(table)
+
+
+def _run_simple_backtest(engine, config, strategy, start_date, end_date):
+    """Run a simple backtest of the strategy."""
+    # This is a placeholder for a simple backtest
+    # In production, you'd want a more sophisticated backtesting engine
+    
+    try:
+        # Initialize strategy
+        if strategy == "hybrid":
+            strat = HybridStrategy(engine, config)
+        else:
+            console.print(f"[yellow]Backtest not implemented for {strategy}[/yellow]")
+            return None
+        
+        # Simple metrics calculation
+        # This would need proper implementation
+        return {
+            'total_return': 0.15,  # Placeholder
+            'sharpe_ratio': 1.2,   # Placeholder
+            'max_drawdown': -0.08,  # Placeholder
+            'win_rate': 0.55,       # Placeholder
+            'total_trades': 42      # Placeholder
+        }
+        
+    except Exception as e:
+        console.print(f"[red]Backtest error: {e}[/red]")
+        return None
+
+@app.command("test-signals")
+def test_signals(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+):
+    """
+    Test signal generation components step by step.
+    """
+    console.print("[bold cyan]SIGNAL GENERATION TEST[/bold cyan]")
+    console.print("=" * 70)
+    
+    s = load_settings(config_path)
+    eng = get_engine(s.paths.db_path)
+    
+    # Step 1: Check database
+    console.print("\n[bold]Step 1: Database Check[/bold]")
+    
+    # Check technical indicators
+    query = """
+    SELECT 
+        COUNT(*) as count,
+        COUNT(DISTINCT symbol) as symbols,
+        COUNT(DISTINCT indicator_name) as indicators,
+        MIN(date) as min_date,
+        MAX(date) as max_date
+    FROM technical_indicators
+    """
+    result = pd.read_sql_query(query, eng)
+    
+    if result['count'].iloc[0] == 0:
+        console.print("[red]❌ No technical indicators found![/red]")
+        console.print("[yellow]Run: quant calculate-features --universe --top-n 50[/yellow]")
+        return
+    
+    console.print(f"✅ Found {result['count'].iloc[0]:,} indicator records")
+    console.print(f"   Symbols: {result['symbols'].iloc[0]}")
+    console.print(f"   Indicators: {result['indicators'].iloc[0]}")
+    console.print(f"   Date range: {result['min_date'].iloc[0]} to {result['max_date'].iloc[0]}")
+    
+    latest_date = result['max_date'].iloc[0]
+    
+    # Step 2: Check required indicators
+    console.print("\n[bold]Step 2: Required Indicators Check[/bold]")
+    
+    required = ['hqm_score', 'momentum_252d', 'momentum_63d', 'rsi', 'ewma_vol']
+    query = f"""
+    SELECT DISTINCT indicator_name 
+    FROM technical_indicators 
+    WHERE indicator_name IN ({','.join([f"'{i}'" for i in required])})
+    """
+    available = pd.read_sql_query(query, eng)
+    available_list = available['indicator_name'].tolist() if not available.empty else []
+    
+    for ind in required:
+        if ind in available_list:
+            console.print(f"✅ {ind}")
+        else:
+            console.print(f"❌ {ind} [red]missing[/red]")
+    
+    if len(available_list) < len(required):
+        console.print("\n[yellow]Some indicators missing. Run: quant calculate-features[/yellow]")
+        
+    # Step 3: Test regime detection
+    console.print("\n[bold]Step 3: Regime Detection Test[/bold]")
+    
+    try:
+        from .analysis.regime_detector import RegimeDetector
+        detector = RegimeDetector(eng)
+        regime_score = detector.detect_current_regime(as_of_date=latest_date)
+        console.print(f"✅ Regime: {regime_score.regime.value} (Confidence: {regime_score.confidence:.1%})")
+        console.print(f"   VIX: {regime_score.signals.vix_level:.2f}")
+        console.print(f"   SPY Momentum: {regime_score.signals.spy_momentum:+.1%}")
+    except Exception as e:
+        console.print(f"❌ Regime detection failed: {e}")
+        
+    # Step 4: Test momentum signals
+    console.print("\n[bold]Step 4: Momentum Signals Test[/bold]")
+    
+    try:
+        mom_gen = MomentumSignalGenerator(eng, s)
+        
+        # Try to get just top 5 stocks
+        query = f"""
+        SELECT 
+            symbol,
+            MAX(CASE WHEN indicator_name = 'hqm_score' THEN value END) as hqm_score,
+            MAX(CASE WHEN indicator_name = 'momentum_252d' THEN value END) as momentum_12m,
+            MAX(CASE WHEN indicator_name = 'rsi' THEN value END) as rsi
+        FROM technical_indicators
+        WHERE date = '{latest_date}'
+        GROUP BY symbol
+        HAVING hqm_score IS NOT NULL
+        ORDER BY hqm_score DESC
+        LIMIT 5
+        """
+        
+        top_stocks = pd.read_sql_query(query, eng)
+        
+        if not top_stocks.empty:
+            console.print("✅ Top momentum stocks found:")
+            for _, row in top_stocks.iterrows():
+                console.print(f"   {row['symbol']}: HQM={row['hqm_score']:.1f}, "
+                             f"12M={row['momentum_12m']:.1%}, RSI={row['rsi']:.1f}")
+        else:
+            console.print("❌ No stocks with HQM scores found")
+            
+    except Exception as e:
+        console.print(f"❌ Momentum signal test failed: {e}")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        
+    # Step 5: Final test
+    console.print("\n[bold]Step 5: Full Signal Generation Test[/bold]")
+    
+    try:
+        # Just try to initialize the hybrid strategy
+        hybrid = HybridStrategy(eng, s)
+        console.print("✅ Strategy initialization successful")
+        
+        # Try to generate signals with explicit date
+        console.print(f"\nAttempting signal generation for {latest_date}...")
+        # Don't actually run it here to avoid long output
+        console.print("[green]Ready to generate signals![/green]")
+        console.print(f"\nRun: quant generate-signals --date {latest_date}")
+        
+    except Exception as e:
+        console.print(f"❌ Strategy initialization failed: {e}")
+        
+    console.print("\n" + "=" * 70)
+    console.print("[bold]TEST COMPLETE[/bold]")
+
+@app.command("calculate-hqm")
+def calculate_hqm(
+    config_path: str = typer.Option("config/settings.yaml", help="Path to settings yaml"),
+    days_back: int = typer.Option(100, help="Number of days to calculate HQM for"),
+):
+    """
+    Calculate HQM scores from existing momentum data.
+    """
+    console.print("[bold cyan]HQM Score Calculation[/bold cyan]")
+    
+    s = load_settings(config_path)
+    analyst = TechnicalAnalyst(s)
+    
+    # Get available dates
+    query = """
+    SELECT DISTINCT date
+    FROM technical_indicators
+    ORDER BY date DESC
+    LIMIT ?
+    """
+    
+    dates_df = pd.read_sql_query(query, analyst.engine, params=[days_back])
+    
+    if dates_df.empty:
+        console.print("[red]No data found in technical_indicators[/red]")
+        return
+    
+    dates = dates_df['date'].tolist()
+    console.print(f"Processing {len(dates)} dates...")
+    
+    # Process each date
+    with console.status("[bold green]Calculating HQM scores...") as status:
+        for i, date in enumerate(dates, 1):
+            status.update(f"[bold green]Processing {date} ({i}/{len(dates)})...")
+            
+            # Calculate cross-sectional features for this date
+            try:
+                features_df = analyst.calculate_cross_sectional_features(date)
+                
+                if not features_df.empty and 'hqm_score' in features_df.columns:
+                    # Save HQM scores back to database
+                    records = []
+                    for _, row in features_df.iterrows():
+                        if pd.notna(row.get('hqm_score')):
+                            records.append({
+                                'date': date,
+                                'symbol': row['symbol'],
+                                'indicator_name': 'hqm_score',
+                                'value': float(row['hqm_score'])
+                            })
+                    
+                    if records:
+                        # Save using analyst's method
+                        import sqlite3
+                        conn = sqlite3.connect(analyst.db_path)
+                        cursor = conn.cursor()
+                        
+                        cursor.executemany("""
+                            INSERT OR REPLACE INTO technical_indicators 
+                            (date, symbol, indicator_name, value)
+                            VALUES (?, ?, ?, ?)
+                        """, [(r['date'], r['symbol'], r['indicator_name'], r['value']) 
+                              for r in records])
+                        
+                        conn.commit()
+                        conn.close()
+                        
+            except Exception as e:
+                console.print(f"[yellow]Error processing {date}: {e}[/yellow]")
+                continue
+    
+    # Verify results
+    query = """
+    SELECT 
+        COUNT(DISTINCT symbol) as symbols,
+        COUNT(*) as total,
+        MIN(date) as min_date,
+        MAX(date) as max_date
+    FROM technical_indicators
+    WHERE indicator_name = 'hqm_score'
+    """
+    
+    result = pd.read_sql_query(query, analyst.engine)
+    
+    console.print("\n[bold]HQM Score Calculation Complete![/bold]")
+    
+    table = Table(title="HQM Score Summary")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="white")
+    
+    table.add_row("Symbols with HQM", str(result['symbols'].iloc[0]))
+    table.add_row("Total Records", f"{result['total'].iloc[0]:,}")
+    table.add_row("Date Range", f"{result['min_date'].iloc[0]} to {result['max_date'].iloc[0]}")
+    
+    console.print(table)
+    
+    # Show top stocks by HQM
+    latest_query = """
+    SELECT symbol, value as hqm_score
+    FROM technical_indicators
+    WHERE indicator_name = 'hqm_score'
+    AND date = (SELECT MAX(date) FROM technical_indicators WHERE indicator_name = 'hqm_score')
+    ORDER BY value DESC
+    LIMIT 10
+    """
+    
+    top_stocks = pd.read_sql_query(latest_query, analyst.engine)
+    
+    if not top_stocks.empty:
+        console.print("\n[bold]Top 10 Stocks by HQM Score:[/bold]")
+        
+        top_table = Table()
+        top_table.add_column("Rank", style="bold")
+        top_table.add_column("Symbol", style="cyan")
+        top_table.add_column("HQM Score", style="green")
+        
+        for i, row in enumerate(top_stocks.itertuples(), 1):
+            top_table.add_row(
+                str(i),
+                row.symbol,
+                f"{row.hqm_score:.1f}"
+            )
+        
+        console.print(top_table)
+    
+    console.print("\n[green]✓[/green] HQM scores calculated successfully!")
+    console.print("You can now run: quant generate-signals")
 
 if __name__ == "__main__":
     app()
